@@ -1,0 +1,3739 @@
+---
+title: "RQ1_C Code"
+format: html
+editor: visual
+---
+
+# Initial Setup
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+library(readr)
+library(tidyverse)
+library(dynr)
+library(dplyr)
+library(psych)
+library(phaseR)
+```
+
+# Loading in Data
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+GP <- read_csv("/Users/dereksimon/Library/CloudStorage/OneDrive-WashingtonUniversityinSt.Louis/Rstuff/First-year-project/GPforDynr.csv", show_col_types = FALSE)
+
+#making sure dataset is of class data frame
+GP <- as.data.frame(GP)
+```
+
+# RQ1
+
+## MLM Models
+
+### Models with only autoregressive terms
+
+#### Linear model
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co)
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0, g1 = 0.1),
+  random.names = c("u0", "u1"),
+  random.params.inicov = matrix(c("var_u0", 0,
+                                  0, "var_u1"), ncol = 2, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0,
+                                  0, 0.1), ncol = 2, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(0.5), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(0.5), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMC1 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMC1 <- dynr.cook(model_MLMC1)
+
+#summary of model estimates
+summary(res_MLMC1)
+```
+
+```{r}
+summary_C1 <- data.frame()
+summary_C1 <- bind_rows(summary_C1, summary(res_MLMC1)$Coefficients,
+                         as.data.frame(summary(res_MLMC1)$neg2LL),
+                         as.data.frame(summary(res_MLMC1)$AIC),
+                         as.data.frame(summary(res_MLMC1)$BIC))
+
+summary_namesC1 <- c("g0", "g1", "var_omega", "var_e", "meanExtra", "varExtra", "varu0", "varu1", ".", ".", ".")
+
+summary_namesC1 <- as.data.frame(summary_namesC1)
+
+summary_C1[, 10] <- summary_namesC1$summary_namesC1
+
+summary_C1 <- summary_C1 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMC1)$AIC`,
+    BIC = `summary(res_MLMC1)$BIC`
+  )
+```
+
+##### Predictions for linear model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitC1 <- model_MLMC1
+coef(modelFitC1) <- coef(res_MLMC1)
+predC1 <- predict(modelFitC1, method = "Kalman")
+predC1 <- as.data.frame(predC1$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predC1 <- predC1[1, ]
+
+#cleaning data frame
+predC1 <- predC1 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predC1 <- predC1 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predC1[, 2] <- GP$PID
+predC1 <- predC1 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predC1 <- predC1 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predC1 <- rowid_to_column(predC1, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predC1 <- predC1 |>
+  left_join(GP_graph, join_by(rowid))
+predC1 <- predC1 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predC1 <- predC1 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predC1 <- predC1 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+predC1 <- predC1 |>
+  left_join(GP_last, join_by(PID))
+predC1 <- predC1 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_C1 = resiSum / lastwave
+  )
+```
+
+#### Quadratic model
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co + b2 * (Co)^2)
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1,
+                     b2 ~ g2 + u2)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+  random.names = c("u0", "u1", "u2"),
+  random.params.inicov = matrix(c("var_u0", 0, 0,
+                                  0, "var_u1", 0,
+                                  0, 0, "var_u2"), ncol = 3, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0, 0,
+                                  0, 0, 0,
+                                  0, 0, 0), ncol = 3, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(2), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMC2 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMC2 <- dynr.cook(model_MLMC2)
+
+#summary of model estimates
+summary(res_MLMC2)
+```
+
+```{r}
+summary_C2 <- data.frame()
+summary_C2 <- bind_rows(summary_C2, summary(res_MLMC2)$Coefficients,
+                         as.data.frame(summary(res_MLMC2)$neg2LL),
+                         as.data.frame(summary(res_MLMC2)$AIC),
+                         as.data.frame(summary(res_MLMC2)$BIC))
+
+summary_namesC2 <- c("g0", "g1", "g2", "var_omega", "var_e", "meanExtra", "varExtra", "var_u0", "var_u1", "var_u2", ".", ".", ".")
+
+summary_namesC2 <- as.data.frame(summary_namesC2)
+
+summary_C2[, 10] <- summary_namesC2$summary_namesC2
+
+summary_C2 <- summary_C2 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMC2)$AIC`,
+    BIC = `summary(res_MLMC2)$BIC`
+  )
+```
+
+##### Predictions for quadratic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitC2 <- model_MLMC2
+coef(modelFitC2) <- coef(res_MLMC2)
+predC2 <- predict(modelFitC2, method = "Kalman")
+predC2 <- as.data.frame(predC2$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predC2 <- predC2[1, ]
+
+#cleaning data frame
+predC2 <- predC2 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predC2 <- predC2 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predC2[, 2] <- GP$PID
+predC2 <- predC2 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predC2 <- predC2 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predC2 <- rowid_to_column(predC2, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predC2 <- predC2 |>
+  left_join(GP_graph, join_by(rowid))
+predC2 <- predC2 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predC2 <- predC2 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predC2 <- predC2 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predC2 <- predC2 |>
+  left_join(GP_last, join_by(PID))
+predC2 <- predC2 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_C2 = resiSum / lastwave
+  )
+```
+
+#### Cubic model
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co + b2 * (Co)^2 + b3 * (Co)^3)
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1,
+                     b2 ~ g2 + u2,
+                     b3 ~ g3 + u3)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0.1, g1 = 0.1, g2 = 0.1, g3 = 0),
+  random.names = c("u0", "u1", "u2", "u3"),
+  random.params.inicov = matrix(c("var_u0", 0, 0, 0,
+                                  0, "var_u1", 0, 0,
+                                  0, 0, "var_u2", 0,
+                                  0, 0, 0, "var_u3"), ncol = 4, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0, 0, 0,
+                                  0, 0.1, 0, 0,
+                                  0, 0, 0, 0,
+                                  0, 0, 0, 0), ncol = 4, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(2), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(2), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMC3 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMC3 <- dynr.cook(model_MLMC3)
+
+#summary of model estimates
+summary(res_MLMC3)
+```
+
+```{r}
+summary_C3 <- data.frame()
+summary_C3 <- bind_rows(summary_C3, summary(res_MLMC3)$Coefficients,
+                         as.data.frame(summary(res_MLMC3)$neg2LL),
+                         as.data.frame(summary(res_MLMC3)$AIC),
+                         as.data.frame(summary(res_MLMC3)$BIC))
+
+summary_namesC3 <- c("g0", "g1", "g2", "g3", "var_omega", "var_e", "meanExtra", "varExtra", "var_u0", "var_u1", "var_u2", "var_u3", ".", ".", ".")
+
+summary_namesC3 <- as.data.frame(summary_namesC3)
+
+summary_C3[, 10] <- summary_namesC3$summary_namesC3
+
+summary_C3 <- summary_C3 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMC3)$AIC`,
+    BIC = `summary(res_MLMC3)$BIC`
+  )
+```
+
+##### Predictions for cubic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitC3 <- model_MLMC3
+coef(modelFitC3) <- coef(res_MLMC3)
+predC3 <- predict(modelFitC3, method = "Kalman")
+predC3 <- as.data.frame(predC3$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predC3 <- predC3[1, ]
+
+#cleaning data frame
+predC3 <- predC3 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predC3 <- predC3 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predC3[, 2] <- GP$PID
+predC3 <- predC3 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predC3 <- predC3 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predC3 <- rowid_to_column(predC3, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predC3 <- predC3 |>
+  left_join(GP_graph, join_by(rowid))
+predC3 <- predC3 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predC3 <- predC3 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predC3 <- predC3 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predC3 <- predC3 |>
+  left_join(GP_last, join_by(PID))
+predC3 <- predC3 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_C3 = resiSum / lastwave
+  )
+```
+
+### Models with situation term
+
+#### Linear model with situation
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC",
+                    covariates = "Duty_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co + b2 * (Duty_PC))
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1,
+                     b2 ~ g2 + u2)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+  random.names = c("u0", "u1", "u2"),
+  random.params.inicov = matrix(c("var_u0", 0, 0,
+                                  0, "var_u1", 0,
+                                  0, 0, "var_u2"), ncol = 3, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0, 0,
+                                  0, 0, 0,
+                                  0, 0, 0), ncol = 3, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMCD1 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMCD1 <- dynr.cook(model_MLMCD1)
+
+#summary of model estimates
+summary(res_MLMCD1)
+```
+
+```{r}
+summary_C2 <- data.frame()
+summary_C2 <- bind_rows(summary_C2, summary(res_MLMC2)$Coefficients,
+                         as.data.frame(summary(res_MLMC2)$neg2LL),
+                         as.data.frame(summary(res_MLMC2)$AIC),
+                         as.data.frame(summary(res_MLMC2)$BIC))
+
+summary_namesC2 <- c("g0", "g1", "g2", "var_omega", "var_e", "meanExtra", "varExtra", "var_u0", "var_u1", "var_u2", ".", ".", ".")
+
+summary_namesC2 <- as.data.frame(summary_namesC2)
+
+summary_C2[, 10] <- summary_namesC2$summary_namesC2
+
+summary_C2 <- summary_C2 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMC2)$AIC`,
+    BIC = `summary(res_MLMC2)$BIC`
+  )
+```
+
+##### Predictions for linear model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitCD1 <- model_MLMCD1
+coef(modelFitCD1) <- coef(res_MLMCD1)
+predCD1 <- predict(modelFitCD1, method = "Kalman")
+predCD1 <- as.data.frame(predCD1$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predCD1 <- predCD1[1, ]
+
+#cleaning data frame
+predCD1 <- predCD1 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predCD1 <- predCD1 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predCD1[, 2] <- GP$PID
+predCD1 <- predCD1 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predCD1 <- predCD1 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predCD1 <- rowid_to_column(predCD1, "rowid")
+
+#run this code for reacting rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+##run this code for subsetted data frame is not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+
+predCD1 <- predCD1 |>
+  left_join(GP_graph, join_by(rowid))
+predCD1 <- predCD1 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predCD1 <- predCD1 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predCD1 <- predCD1 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+##run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predCD1 <- predCD1 |>
+  left_join(GP_last, join_by(PID))
+predCD1 <- predCD1 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_CD1 = resiSum / lastwave
+  )
+```
+
+#### Quadratic model with situation
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC",
+                    covariates = "Duty_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co + b2 * (Co)^2 + b3 * (Duty_PC))
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1,
+                     b2 ~ g2 + u2,
+                     b3 ~ g3 + u3)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0, g1 = 0.1, g2 = 0.1, g3 = 0.1),
+  random.names = c("u0", "u1", "u2", "u3"),
+  random.params.inicov = matrix(c("var_u0", 0, 0, 0,
+                                  0, "var_u1", 0, 0,
+                                  0, 0, "var_u2", 0,
+                                  0, 0, 0, "var_u3"), ncol = 4, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0, 0, 0,
+                                  0, 0, 0, 0,
+                                  0, 0, 0, 0,
+                                  0, 0, 0, 0), ncol = 4, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMCD2 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMCD2 <- dynr.cook(model_MLMCD2)
+
+#summary of model estimates
+summary(res_MLMCD2)
+```
+
+```{r}
+summary_CD2 <- data.frame()
+summary_CD2 <- bind_rows(summary_CD2, summary(res_MLMCD2)$Coefficients,
+                         as.data.frame(summary(res_MLMCD2)$neg2LL),
+                         as.data.frame(summary(res_MLMCD2)$AIC),
+                         as.data.frame(summary(res_MLMCD2)$BIC))
+
+summary_namesCD2 <- c("g0", "g1", "g2", "g3", "var_omega", "var_e", "meanExtra", "varExtra", "var_u0", "var_u1", "var_u2", "var_u3", ".", ".", ".")
+
+summary_namesCD2 <- as.data.frame(summary_namesCD2)
+
+summary_CD2[, 10] <- summary_namesCD2$summary_namesCD2
+
+summary_CD2 <- summary_CD2 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMCD2)$AIC`,
+    BIC = `summary(res_MLMCD2)$BIC`
+  )
+```
+##### Predictions for quadratic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitCD2 <- model_MLMCD2
+coef(modelFitCD2) <- coef(res_MLMCD2)
+predCD2 <- predict(modelFitCD2, method = "Kalman")
+predCD2 <- as.data.frame(predCD2$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predCD2 <- predCD2[1, ]
+
+#cleaning data frame
+predCD2 <- predCD2 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predCD2 <- predCD2 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predCD2[, 2] <- GP$PID
+predCD2 <- predCD2 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predCD2 <- predCD2 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predCD2 <- rowid_to_column(predCD2, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predCD2 <- predCD2 |>
+  left_join(GP_graph, join_by(rowid))
+predCD2 <- predCD2 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predCD2 <- predCD2 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predCD2 <- predCD2 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predCD2 <- predCD2 |>
+  left_join(GP_last, join_by(PID))
+predCD2 <- predCD2 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_CD2 = resiSum / lastwave
+  )
+```
+
+#### Cubic model with situation term
+
+```{r}
+#creating list of data for parameter estimation
+GPdata <- dynr.data(GP, id = "PID", time = "wave",
+                    observed = "Cons_PC",
+                    covariates = "Duty_PC"
+                    
+)
+
+#preparing measurement model
+meas <- prep.measurement(
+  values.load = diag(1),
+  obs.names = "Cons_PC",
+  state.names = c("Co")
+)
+
+#specifying dynamic functions using formulas
+formula = list(Co ~ b0 + b1 * Co + b2 * (Co)^2 + b3 * (Co)^3 + b4 * (Duty_PC))
+
+theta.formula = list(b0 ~ g0 + u0,
+                     b1 ~ g1 + u1,
+                     b2 ~ g2 + u2,
+                     b3 ~ g3 + u3,
+                     b4 ~ g4 + u4)
+
+dynrm <- prep.formulaDynamics(
+  formula = formula, 
+  theta.formula = theta.formula,
+  startval = c(g0 = 0, g1 = 0.1, g2 = 0.1, g3 = 0, g4 = 0.1),
+  random.names = c("u0", "u1", "u2", "u3", "u4"),
+  random.params.inicov = matrix(c("var_u0", 0, 0, 0, 0,
+                                  0, "var_u1", 0, 0, 0,
+                                  0, 0, "var_u2", 0, 0,
+                                  0, 0, 0, "var_u3", 0,
+                                  0, 0, 0, 0, "var_u4"), ncol = 5, byrow = TRUE),
+  random.values.inicov = matrix(c(0, 0, 0, 0, 0,
+                                  0, 0, 0, 0, 0,
+                                  0, 0, 0, 0, 0,
+                                  0, 0, 0, 0, 0,
+                                  0, 0, 0, 0, 0), ncol = 5, byrow = TRUE),
+  isContinuousTime = TRUE
+)
+
+#specifying measurement error and process noise covariance structures with starting values
+mdcov <- prep.noise(
+  values.latent = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.latent = matrix(c("var_omega"), ncol = 1, byrow = TRUE),
+  values.observed = matrix(c(1), ncol = 1, byrow = TRUE),
+  params.observed = matrix(c("var_e"), ncol = 1, byrow = TRUE)
+)
+
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point across all participants as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+
+#specifying vector containing the above starting values
+
+#run code if it has not been created already
+startVals <- c(meanCons = mean(GPval$firstCons, na.rm = TRUE),
+               varCons = var(GPval$firstCons, na.rm = TRUE)
+)
+
+#preparing initial conditions for the model
+initial <- prep.initial(
+  values.inistate = startVals["meanCons"],
+  params.inistate = "meanCons",
+  values.inicov = matrix(c(startVals["varCons"]), ncol = 1, byrow = TRUE),
+  params.inicov = matrix(c("varCons"), ncol = 1, byrow = TRUE)
+)
+
+#creating dynrModel object for parameter estimation
+model_MLMCD3 <- dynr.model(
+  dynamics = dynrm, 
+  measurement = meas,
+  noise = mdcov,
+  initial = initial,
+  data = GPdata
+  )
+
+#cook the dynr model to estimate free parameters
+res_MLMCD3 <- dynr.cook(model_MLMCD3)
+
+#summary of model estimates
+summary(res_MLMCD3)
+```
+
+```{r}
+summary_CD3 <- data.frame()
+summary_CD3 <- bind_rows(summary_CD3, summary(res_MLMCD3)$Coefficients,
+                         as.data.frame(summary(res_MLMCD3)$neg2LL),
+                         as.data.frame(summary(res_MLMCD3)$AIC),
+                         as.data.frame(summary(res_MLMCD3)$BIC))
+
+summary_namesCD3 <- c("g0", "g1", "g2", "g3", "g4", "var_omega", "var_e", "meanExtra", "varExtra", "var_u0", "var_u1", "var_u2", "var_u3", "var_u4", ".", ".", ".")
+
+summary_namesCD3 <- as.data.frame(summary_namesCD3)
+
+summary_CD3[, 10] <- summary_namesCD3$summary_namesCD3
+
+summary_CD3 <- summary_CD3 |>
+  relocate(
+    V10, .before = Estimate
+  ) |>
+  rename(
+    terms = V10,
+    LogLik = `c(x)`,
+    AIC = `summary(res_MLMCD3)$AIC`,
+    BIC = `summary(res_MLMCD3)$BIC`
+  )
+```
+
+##### Predictions for cubic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Generating dynr model predictions adapted from Hunter, Fatimah, and Bornovalova (2022)
+modelFitCD3 <- model_MLMCD3
+coef(modelFitCD3) <- coef(res_MLMCD3)
+predCD3 <- predict(modelFitCD3, method = "Kalman")
+predCD3 <- as.data.frame(predCD3$estimate)
+
+#Extracting predicted values from the first row of the data frame
+predCD3 <- predCD3[1, ]
+
+#cleaning data frame
+predCD3 <- predCD3 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "wave",
+    values_to = "estimate"
+  )
+predCD3 <- predCD3 |>
+  select(-1)
+
+#appending participant IDs to predictions data frame
+predCD3[, 2] <- GP$PID
+predCD3 <- predCD3 |>
+  rename(
+    PID = "...2"
+  ) |>
+  relocate(
+    PID, .before = estimate
+  )
+
+#creating analogous wave variable to predictions data frame
+predCD3 <- predCD3 |>
+  group_by(PID) |>
+  mutate(
+    wave = 1:n(),
+    .before = PID
+  )
+
+#creating row id column for joining purposes
+predCD3 <- rowid_to_column(predCD3, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+
+predCD3 <- predCD3 |>
+  left_join(GP_graph, join_by(rowid))
+predCD3 <- predCD3 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predCD3 <- predCD3 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predCD3 <- predCD3 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predCD3 <- predCD3 |>
+  left_join(GP_last, join_by(PID))
+predCD3 <- predCD3 |>
+  group_by(PID) |>
+  mutate(
+    resiMLM_CD3 = resiSum / lastwave
+  )
+```
+
+## Idiographic Models
+
+```{r}
+#Following recommendations by Liu, Ou, and Ferrer (2021) to have the mean and variance of the first data point as the default starting positions for the initial conditions.
+
+#run code if data frame has not been created already
+GPval <- GP |>
+  group_by(PID) |>
+  mutate(
+    firstCons = first(Cons_PC),
+    varCons = var(Cons_PC)
+  )
+GPval <- GPval |>
+  subset(
+    select = c(PID, firstCons, varCons)
+  )
+GPval <- unique(GPval)
+GPval <- as.data.frame(GPval)
+```
+
+### Models with only autoregressive terms
+
+#### Linear model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funC1 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_C1 <- data.frame()
+for (i in 1:nrow(GPval)) {
+  fit <- model_funC1(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_C1 <- bind_rows(summary_C1, summary(fit)$Coefficients,
+                          as.data.frame(summary(fit)$neg2LL),
+                          as.data.frame(summary(fit)$AIC),
+                          as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesC1 <- c("g0", "g1", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesC1 <- as.data.frame(summary_namesC1)
+summary_namesC1 <- do.call("rbind", replicate(217, summary_namesC1))
+summary_namesC1 <- as.data.frame(summary_namesC1)
+summary_namesC1 <- summary_namesC1 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesC1 <- summary_namesC1 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesC1 <- rowid_to_column(summary_namesC1, "rowid")
+summary_C1 <- rowid_to_column(summary_C1, "rowid")
+summary_C1 <- summary_C1 |>
+  left_join(summary_namesC1, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_C1 <- rep(GPPID, each = 9)
+repeat_C1 <- as.data.frame(repeat_C1)
+repeat_C1 <- rowid_to_column(repeat_C1, "rowid")
+summary_C1 <- summary_C1 |>
+  relocate(
+    terms, .before = Estimate
+  )
+summary_C1 <- summary_C1 |>
+  left_join(repeat_C1, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_C1 <- summary_C1 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_C1 <- summary_C1 |>
+  relocate(
+    repeat_C1, .before = terms
+  ) |>
+  rename(
+    PID = repeat_C1
+  )
+```
+
+##### Predictions for linear model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predC1 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predIC1 <- data.frame()
+predIC1 <- rowid_to_column(predIC1, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predC1(GPval[i,1], GPval[i,2], GPval[i,3])
+  predIC1 <- bind_rows(predIC1, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predIC1[, 1] <- GP$PID
+
+#cleaning data frame
+predIC1 <- predIC1 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predIC1 <- rowid_to_column(predIC1, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predIC1 <- predIC1 |>
+  left_join(GP_graph, join_by(rowid))
+predIC1 <- predIC1 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predIC1 <- predIC1 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predIC1 <- predIC1 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarise(
+    lastwave = last(wave)
+  )
+
+predIC1 <- predIC1 |>
+  left_join(GP_last, join_by(PID))
+predIC1 <- predIC1 |>
+  group_by(PID) |>
+  mutate(
+    resiI_C1 = resiSum / lastwave
+  )
+```
+
+#### Quadratic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funC2 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_C2 <- data.frame()
+for (i in 1:nrow(GPval)) {
+  fit <- model_funC2(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_C2 <- bind_rows(summary_C2, summary(fit)$Coefficients,
+                          as.data.frame(summary(fit)$neg2LL),
+                          as.data.frame(summary(fit)$AIC),
+                          as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesC2 <- c("g0", "g1", "g2", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesC2 <- as.data.frame(summary_namesC2)
+summary_namesC2 <- do.call("rbind", replicate(217, summary_namesC2))
+summary_namesC2 <- as.data.frame(summary_namesC2)
+summary_namesC2 <- summary_namesC2 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesC2 <- summary_namesC2 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesC2 <- rowid_to_column(summary_namesC2, "rowid")
+summary_C2 <- rowid_to_column(summary_C2, "rowid")
+summary_C2 <- summary_C2 |>
+  left_join(summary_namesC2, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code for Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_C2 <- rep(GPPID, each = 10)
+repeat_C2 <- as.data.frame(repeat_C2)
+repeat_C2 <- rowid_to_column(repeat_C2, "rowid")
+summary_C2 <- summary_C2 |>
+  relocate(
+    terms, .before = Estimate
+  )
+summary_C2 <- summary_C2 |>
+  left_join(repeat_C2, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_C2 <- summary_C2 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_C2 <- summary_C2 |>
+  relocate(
+    repeat_C2, .before = terms
+  ) |>
+  rename(
+    PID = repeat_C2
+  )
+```
+
+##### Predictions for quadratic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predC2 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predIC2 <- data.frame()
+predIC2 <- rowid_to_column(predIC2, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predC2(GPval[i,1], GPval[i,2], GPval[i,3])
+  predIC2 <- bind_rows(predIC2, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predIC2[, 1] <- GP$PID
+
+#cleaning data frame
+predIC2 <- predIC2 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predIC2 <- rowid_to_column(predIC2, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predIC2 <- predIC2 |>
+  left_join(GP_graph, join_by(rowid))
+predIC2 <- predIC2 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predIC2 <- predIC2 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predIC2 <- predIC2 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarize(
+    lastwave = last(wave)
+  )
+
+predIC2 <- predIC2 |>
+  left_join(GP_last, join_by(PID))
+predIC2 <- predIC2 |>
+  group_by(PID) |>
+  mutate(
+    resiI_C2 = resiSum / lastwave
+  )
+```
+
+#### Cubic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funC3 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Con)^3)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1, g3 = 0),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_C3 <- data.frame()
+for (i in 1:nrow(GPval)) {
+  fit <- model_funC3(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_C3 <- bind_rows(summary_C3, summary(fit)$Coefficients,
+                          as.data.frame(summary(fit)$neg2LL),
+                          as.data.frame(summary(fit)$AIC),
+                          as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesC3 <- c("g0", "g1", "g2", "g3", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesC3 <- as.data.frame(summary_namesC3)
+summary_namesC3 <- do.call("rbind", replicate(217, summary_namesC3))
+summary_namesC3 <- as.data.frame(summary_namesC3)
+summary_namesC3 <- summary_namesC3 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesC3 <- summary_namesC3 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesC3 <- rowid_to_column(summary_namesC3, "rowid")
+summary_C3 <- rowid_to_column(summary_C3, "rowid")
+summary_C3 <- summary_C3 |>
+  left_join(summary_namesC3, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code for Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_C3 <- rep(GPPID, each = 11)
+repeat_C3 <- as.data.frame(repeat_C3)
+repeat_C3 <- rowid_to_column(repeat_C3, "rowid")
+summary_C3 <- summary_C3 |>
+  relocate(
+    terms, .before = Estimate
+  )
+summary_C3 <- summary_C3 |>
+  left_join(repeat_C3, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_C3 <- summary_C3 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_C3 <- summary_C3 |>
+  relocate(
+    repeat_C3, .before = terms
+  ) |>
+  rename(
+    PID = repeat_C3
+  )
+```
+
+##### Predictions for cubic model
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predC3 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Con)^3)
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1, g3 = 0),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predIC3 <- data.frame()
+predIC3 <- rowid_to_column(predIC3, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predC3(GPval[i,1], GPval[i,2], GPval[i,3])
+  predIC3 <- bind_rows(predIC3, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predIC3[, 1] <- GP$PID
+
+#cleaning data frame
+predIC3 <- predIC3 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predIC3 <- rowid_to_column(predIC3, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predIC3 <- predIC3 |>
+  left_join(GP_graph, join_by(rowid))
+predIC3 <- predIC3 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predIC3 <- predIC3 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predIC3 <- predIC3 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarize(
+    lastwave = last(wave)
+  )
+
+predIC3 <- predIC3 |>
+  left_join(GP_last, join_by(PID))
+predIC3 <- predIC3 |>
+  group_by(PID) |>
+  mutate(
+    resiI_C3 = resiSum / lastwave
+  )
+```
+
+### Models with situation term
+
+#### Linear model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funCD1 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_CD1 <- data.frame()
+
+for (i in 1:nrow(GPval)) {
+  fit <- model_funCD1(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_CD1 <- bind_rows(summary_CD1, summary(fit)$Coefficients,
+                           as.data.frame(summary(fit)$neg2LL),
+                           as.data.frame(summary(fit)$AIC),
+                           as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesCD1 <- c("g0", "g1", "g2", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesCD1 <- as.data.frame(summary_namesCD1)
+summary_namesCD1 <- do.call("rbind", replicate(217, summary_namesCD1))
+summary_namesCD1 <- as.data.frame(summary_namesCD1)
+summary_namesCD1 <- summary_namesCD1 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesCD1 <- summary_namesCD1 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesCD1 <- rowid_to_column(summary_namesCD1, "rowid")
+summary_CD1 <- rowid_to_column(summary_CD1, "rowid")
+summary_CD1 <- summary_CD1 |>
+  left_join(summary_namesCD1, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code for Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_CD1 <- rep(GPPID, each = 10)
+repeat_CD1 <- as.data.frame(repeat_CD1)
+repeat_CD1 <- rowid_to_column(repeat_CD1, "rowid")
+summary_CD1 <- summary_CD1 |>
+  left_join(repeat_CD1, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_CD1 <- summary_CD1 |>
+  relocate(
+    terms, .before = Estimate
+  ) |>
+  select(-1)
+summary_CD1 <- summary_CD1 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_CD1 <- summary_CD1 |>
+  relocate(
+    repeat_CD1, .before = terms
+  ) |>
+  rename(
+    PID = repeat_CD1
+  )
+```
+
+##### Predictions for linear model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predCD1 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predICD1 <- data.frame()
+predICD1 <- rowid_to_column(predICD1, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predCD1(GPval[i,1], GPval[i,2], GPval[i,3])
+  predICD1 <- bind_rows(predICD1, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predICD1[, 1] <- GP$PID
+
+#cleaning data frame
+predICD1 <- predICD1 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predICD1 <- rowid_to_column(predICD1, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predICD1 <- predICD1 |>
+  left_join(GP_graph, join_by(rowid))
+predICD1 <- predICD1 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predICD1 <- predICD1 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predICD1 <- predICD1 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarize(
+    lastwave = last(wave)
+  )
+
+predICD1 <- predICD1 |>
+  left_join(GP_last, join_by(PID))
+predICD1 <- predICD1 |>
+  group_by(PID) |>
+  mutate(
+    resiI_CD1 = resiSum / lastwave
+  )
+```
+
+#### Quadratic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funCD2 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0, g3 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_CD2 <- data.frame()
+for (i in 1:nrow(GPval)) {
+  fit <- model_funCD2(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_CD2 <- bind_rows(summary_CD2, summary(fit)$Coefficients,
+                           as.data.frame(summary(fit)$neg2LL),
+                           as.data.frame(summary(fit)$AIC),
+                           as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesCD2 <- c("g0", "g1", "g2", "g3", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesCD2 <- as.data.frame(summary_namesCD2)
+summary_namesCD2 <- do.call("rbind", replicate(217, summary_namesCD2))
+summary_namesCD2 <- as.data.frame(summary_namesCD2)
+summary_namesCD2 <- summary_namesCD2 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesCD2 <- summary_namesCD2 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesCD2 <- rowid_to_column(summary_namesCD2, "rowid")
+summary_CD2 <- rowid_to_column(summary_CD2, "rowid")
+summary_CD2 <- summary_CD2 |>
+  left_join(summary_namesCD2, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code for Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_CD2 <- rep(GPPID, each = 11)
+repeat_CD2 <- as.data.frame(repeat_CD2)
+repeat_CD2 <- rowid_to_column(repeat_CD2, "rowid")
+summary_CD2 <- summary_CD2 |>
+  left_join(repeat_CD2, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_CD2 <- summary_CD2 |>
+  relocate(
+    terms, .before = Estimate
+  ) |>
+  select(-1)
+summary_CD2 <- summary_CD2 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_CD2 <- summary_CD2 |>
+  relocate(
+    repeat_CD2, .before = terms
+  ) |>
+  rename(
+    PID = repeat_CD2
+  )
+```
+
+##### Predictions for quadratic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predCD2 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0, g3 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predICD2 <- data.frame()
+predICD2 <- rowid_to_column(predICD2, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predCD2(GPval[i,1], GPval[i,2], GPval[i,3])
+  predICD2 <- bind_rows(predICD2, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predICD2[, 1] <- GP$PID
+
+#cleaning data frame
+predICD2 <- predICD2 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predICD2 <- rowid_to_column(predICD2, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predICD2 <- predICD2 |>
+  left_join(GP_graph, join_by(rowid))
+predICD2 <- predICD2 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predICD2 <- predICD2 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predICD2 <- predICD2 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarize(
+    lastwave = last(wave)
+  )
+
+predICD2 <- predICD2 |>
+  left_join(GP_last, join_by(PID))
+predICD2 <- predICD2 |>
+  group_by(PID) |>
+  mutate(
+    resiI_CD2 = resiSum / lastwave
+  )
+```
+
+#### Cubic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model across each participant
+model_funCD3 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Con)^3 + g4 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0, g3 = 0, g4 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  return(res)
+}
+
+#Extracting coefficients from each participants' model and compiling them into one, aggregate data frame
+summary_CD3 <- data.frame()
+for (i in 1:nrow(GPval)) {
+  fit <- model_funCD3(GPval[i,1], GPval[i,2], GPval[i,3])
+  summary_CD3 <- bind_rows(summary_CD3, summary(fit)$Coefficients,
+                           as.data.frame(summary(fit)$neg2LL),
+                           as.data.frame(summary(fit)$AIC),
+                           as.data.frame(summary(fit)$BIC))
+}
+
+#cleaning aggregate data frame
+
+#Extracting names of estimate names to put into a distinct column
+summary_namesCD3 <- c("g0", "g1", "g2", "g3", "g4", "var_omega", "var_e", "firstCons", "varCons", ".", ".", ".")
+summary_namesCD3 <- as.data.frame(summary_namesCD3)
+summary_namesCD3 <- do.call("rbind", replicate(217, summary_namesCD3))
+summary_namesCD3 <- as.data.frame(summary_namesCD3)
+summary_namesCD3 <- summary_namesCD3 |>
+  pivot_longer(
+    cols = starts_with("V"),
+    names_to = "names",
+  )
+summary_namesCD3 <- summary_namesCD3 |>
+  rename(
+    terms = value
+  ) |>
+  select(-1)
+summary_namesCD3 <- rowid_to_column(summary_namesCD3, "rowid")
+summary_CD3 <- rowid_to_column(summary_CD3, "rowid")
+summary_CD3 <- summary_CD3 |>
+  left_join(summary_namesCD3, join_by(rowid))
+
+#Extracting participant ids into aggregate data frame
+
+#run this code for Extracting PIDs if not created already
+GPPID <- as.numeric(GPval$PID)
+
+repeat_CD3 <- rep(GPPID, each = 12)
+repeat_CD3 <- as.data.frame(repeat_CD3)
+repeat_CD3 <- rowid_to_column(repeat_CD3, "rowid")
+summary_CD3 <- summary_CD3 |>
+  left_join(repeat_CD3, join_by(rowid))
+
+#additional cleaning for naming and relocating purposes
+summary_CD3 <- summary_CD3 |>
+  relocate(
+    terms, .before = Estimate
+  ) |>
+  select(-1)
+summary_CD3 <- summary_CD3 |>
+  rename(
+    LogLik = "c(x)",
+    AIC = `summary(fit)$AIC`,
+    BIC = `summary(fit)$BIC`
+  )
+summary_CD3 <- summary_CD3 |>
+  relocate(
+    repeat_CD3, .before = terms
+  ) |>
+  rename(
+    PID = repeat_CD3
+  )
+```
+
+##### Predictions for cubic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#function for iterating idiographic model predictions across each participant
+model_predCD3 <- function(x, y, z){
+  GP_x <- GP |>
+    filter(PID==x)
+  
+  GPdata <- dynr.data(GP_x, id = "PID", time = "wave",
+                      observed = "Cons_PC", 
+                      covariates = "Duty_PC")
+  
+  meas <- prep.measurement(
+    values.load = diag(1),
+    obs.names = "Cons_PC",
+    state.names = "Con"
+  )
+  
+  initial <- prep.initial(
+    values.inistate = y,
+    params.inistate ="firstCons",
+    values.inicov = diag(c(z), 1),
+    params.inicov = diag(c("varCons"), 1)
+  )
+  
+  mdcov <- prep.noise(
+    values.latent = diag(c(0), 1),
+    params.latent = diag(c("var_omega"), 1),
+    values.observed = diag(c(0.1), 1),
+    params.observed = diag(c("var_e"), 1)
+  )
+  
+  formula=list(
+    list(Con ~ g0 + g1 * Con + g2 * (Con)^2 + g3 * (Con)^3 + g4 * (Duty_PC))
+  )
+  
+  dynrm <- prep.formulaDynamics(
+    formula = formula, 
+    startval = c(g0 = 0, g1 = 0.1, g2 = 0, g3 = 0, g4 = 0.1),
+    isContinuousTime = TRUE
+  )
+  
+  model <- dynr.model(
+    dynamics = dynrm, 
+    measurement = meas,
+    noise = mdcov,
+    initial = initial,
+    data = GPdata
+  )
+  
+  res <- dynr.cook(model)
+  
+  modelFit <- model
+  
+  coef(modelFit) <- coef(res)
+  
+  Copred <- predict(modelFit, method = "Kalman")
+  
+  Copred <- as.data.frame(Copred)
+  
+  Copred <- Copred[-2, ]
+  
+  Copred <- Copred |>
+    select(-contains("CI"))
+  
+  Copred <- Copred |>
+    pivot_longer(
+      cols = starts_with("estimate"),
+      names_to = "wave",
+      values_to = "estimate"
+    )
+  
+  Copred <- Copred |>
+    select(-wave)
+  
+  Copred <- rowid_to_column(Copred, "rowid")
+  
+  return(Copred)
+}
+
+#executing function and compiling estimates per participant into an aggregate data frame
+predICD3 <- data.frame()
+predICD3 <- rowid_to_column(predICD3, "rowid")
+for (i in 1:nrow(GPval)) {
+  fit <- model_predCD3(GPval[i,1], GPval[i,2], GPval[i,3])
+  predICD3 <- bind_rows(predICD3, as.data.frame(fit$estimate))
+}
+
+#appending participant IDs to predictions data frame
+predICD3[, 1] <- GP$PID
+
+#cleaning data frame
+predICD3 <- predICD3 |>
+  rename(
+    PID = rowid,
+    estimate = `fit$estimate`
+  )
+
+#creating row id column for joining purposes
+predICD3 <- rowid_to_column(predICD3, "rowid")
+
+#run this code for creating rowid column if not created already
+GP <- rowid_to_column(GP, "rowid")
+
+#creating data frame with only rowid and person-centered Conversion scores for residual sum of squares procedure
+
+#run this code for subsetted data frame if not created already
+GP_graph <- GP |>
+  select(c(rowid, Cons_PC))
+
+predICD3 <- predICD3 |>
+  left_join(GP_graph, join_by(rowid))
+predICD3 <- predICD3 |>
+  select(-1)
+
+#procedure for conducting residual sum of squares with predictions estimates and observed values
+predICD3 <- predICD3 |>
+  mutate(
+    resiCon = Cons_PC - estimate,
+    resi2 = resiCon^2
+  )
+predICD3 <- predICD3 |>
+  group_by(PID) |>
+  mutate(
+    resiSum = sum(resi2),
+  )
+#Extracting last wave of participants to divide by the square root of N
+
+#run this code for creating last wave variable if not created already
+GP_last <- GP |>
+  group_by(PID) |>
+  summarize(
+    lastwave = last(wave)
+  )
+
+predICD3 <- predICD3 |>
+  left_join(GP_last, join_by(PID))
+predICD3 <- predICD3 |>
+  group_by(PID) |>
+  mutate(
+    resiI_CD3 = resiSum / lastwave
+  )
+```
+
+## Model Comparison with Residual Sum of Squares
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Extracting residual sum of squares for each participant per MLM model
+predC1 <- predC1 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_C1)
+
+predC2 <- predC2 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_C2)
+
+predC3 <- predC3 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_C3)
+
+predCD1 <- predCD1 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_CD1)
+
+predCD2 <- predCD2 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_CD2)
+
+predCD3 <- predCD3 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiMLM_CD3)
+
+#Extracting residual sum of squares for each participant per idiographic model
+predIC1 <- read_csv("pred_IC1.csv")
+
+predIC2 <- read_csv("pred_IC2.csv")
+
+predIC3 <- read_csv("pred_IC3.csv")
+
+predICD1 <- read_csv("pred_ICD1.csv")
+
+predICD2 <- read_csv("pred_ICD2.csv")
+
+predICD3 <- read_csv("pred_ICD3.csv")
+
+predIC1 <- predIC1 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_C1)
+
+predIC2 <- predIC2 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_C2)
+
+predIC3 <- predIC3 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_C3)
+
+predICD1 <- predICD1 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_CD1)
+
+predICD2 <- predICD2 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_CD2)
+
+predICD3 <- predICD3 |>
+  group_by(PID) |>
+  distinct(PID, .keep_all = TRUE) |>
+  select(PID, resiI_CD3)
+
+#creating aggregate data frame with all model residual sum of squares
+full_comp <- predC1 |>
+  left_join(predC2) |>
+  left_join(predC3) |>
+  left_join(predCD1) |>
+  left_join(predCD2) |>
+  left_join(predCD3) |>
+  left_join(predIC1) |>
+  left_join(predIC2) |>
+  left_join(predIC3) |>
+  left_join(predICD1) |>
+  left_join(predICD2) |>
+  left_join(predICD3)
+
+#to determine least residual sum of squares across all models
+full_comp <- full_comp |>
+  group_by(PID) |>
+  mutate(
+    leastRes = names(full_comp[, 2:13])[which.min(c(resiMLM_C1, resiMLM_C2, 
+                                                    resiMLM_C3, resiMLM_CD1,
+                                                    resiMLM_CD2, resiMLM_CD3,
+                                                    resiI_C1, resiI_C2, resiI_C3,
+                                                    resiI_CD1, resiI_CD2,
+                                                    resiI_CD3))]
+  )
+```
+
+## Idiographic Model Comparison with Loglikelihood
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Extracting Loglikelihood each person across models
+Logsumm_C1 <- summary_C1 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_C1 = mean(LogLik, na.rm = TRUE)
+  )
+
+Logsumm_C2 <- summary_C2 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_C2 = mean(LogLik, na.rm = TRUE)
+  )
+
+Logsumm_C3 <- summary_C3 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_C3 = mean(LogLik, na.rm = TRUE)
+  )
+
+Logsumm_CD1 <- summary_CD1 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_CD1 = mean(LogLik, na.rm = TRUE)
+  )
+
+Logsumm_CD2 <- summary_CD2 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_CD2 = mean(LogLik, na.rm = TRUE)
+  )
+
+Logsumm_CD3 <- summary_CD3 |>
+  group_by(PID) |>
+  summarise(
+    LogLik_CD3 = mean(LogLik, na.rm = TRUE)
+  )
+
+#creating aggregate data frame with terms of interest across all models
+Log_summ <- Logsumm_C1 |>
+  left_join(Logsumm_C2) |>
+  left_join(Logsumm_C3) |>
+  left_join(Logsumm_CD1) |>
+  left_join(Logsumm_CD2) |>
+  left_join(Logsumm_CD3)
+
+#relocating columns for cleaning purposes
+Log_summ <- Log_summ |>
+  relocate(
+    LogLik_CD3, .after = LogLik_C1
+  ) |>
+  relocate(
+    LogLik_CD2, .after = LogLik_C1
+  ) |>
+  relocate(
+    LogLik_CD1, .after = LogLik_C1
+  ) |>
+  relocate(
+    LogLik_C3, .after = LogLik_C1
+  ) |>
+  relocate(
+    LogLik_C2, .after = LogLik_C1
+  )
+
+#to determine maximum loglikelihood, minimum AIC, and minimum BIC across all models
+Log_summ <- Log_summ |>
+  group_by(PID) |>
+  mutate(maxLogLik = names(Log_summ[, 2:7])[which.max(c(LogLik_C1, LogLike_C2,
+                                                         LogLik_C3, LogLik_CD1,
+                                                         LogLik_CD2, LogLik_CD3))]
+         )
+```
+
+## Idiographic Model Likelihood Ratio Test
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#Extracting loglikelihood into separate dataframe
+log_test <- Log_summ |>
+  select(1:7)
+
+#conducting likelihood ratio test across each model combination
+log_test <- log_test |>
+  group_by(PID) |>
+  summarise(
+      diffC1_C2 = -2 * (log(LogLik_C1) - log(LogLik_C2)),
+      diffC1_C3 = -2 * (log(LogLik_C1) - log(LogLik_C3)),
+      diffC1_CD1 = -2 * (log(LogLik_C1) - log(LogLik_CD1)),
+      diffC1_CD2 = -2 * (log(LogLik_C1) - log(LogLik_CD2)),
+      diffC1_CD3 = -2 * (log(LogLik_C1) - log(LogLik_CD3)),
+      diffC2_C3 = -2 * (log(LogLik_C2) - log(LogLik_C3)),
+      diffC2_CD1 = -2 * (log(LogLik_C2) - log(LogLik_CD1)),
+      diffC2_CD2 = -2 * (log(LogLik_C2) - log(LogLik_CD2)),
+      diffC2_CD3 = -2 * (log(LogLik_C2) - log(LogLik_CD3)),
+      diffCD1_C3 = -2 * (log(LogLik_CD1) - log(LogLik_C3)),
+      diffC3_CD2 = -2 * (log(LogLik_C3) - log(LogLik_CD2)),
+      diffC3_CD3 = -2 * (log(LogLik_C3) - log(LogLik_CD3)),
+      diffCD1_CD2 = -2 * (log(LogLik_CD1) - log(LogLik_CD2)),
+      diffCD1_CD3 = -2 * (log(LogLik_CD1) - log(LogLik_CD3)),
+      diffCD2_CD3 = -2 * (log(LogLik_CD2) - log(LogLik_CD3))
+  )
+```
+
+# RQ2a: Idiographic Model Comparison with AIC
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting AIC each person across models
+AICsumm_C1 <- summary_C1 |>
+  group_by(PID) |>
+  summarise(
+    AIC_C1 = mean(AIC, na.rm = TRUE)
+  )
+
+AICsumm_C2 <- summary_C2 |>
+  group_by(PID) |>
+  summarise(
+    AIC_C2 = mean(AIC, na.rm = TRUE)
+  )
+
+AICsumm_C3 <- summary_C3 |>
+  group_by(PID) |>
+  summarise(
+    AIC_C3 = mean(AIC, na.rm = TRUE)
+  )
+
+AICsumm_CD1 <- summary_CD1 |>
+  group_by(PID) |>
+  summarise(
+    AIC_CD1 = mean(AIC, na.rm = TRUE)
+  )
+
+AICsumm_CD2 <- summary_CD2 |>
+  group_by(PID) |>
+  summarise(
+    AIC_CD2 = mean(AIC, na.rm = TRUE)
+  )
+
+AICsumm_CD3 <- summary_CD3 |>
+  group_by(PID) |>
+  summarise(
+    AIC_CD3 = mean(AIC, na.rm = TRUE)
+  )
+
+#creating aggregate data frame with terms of interest across all models
+AIC_summ <- AICsumm_C1 |>
+  left_join(AICsumm_C2) |>
+  left_join(AICsumm_C3) |>
+  left_join(AICsumm_CD1) |>
+  left_join(AICsumm_CD2) |>
+  left_join(AICsumm_CD3)
+
+#relocating columns for cleaning purposes
+AIC_summ <- AIC_summ |>
+  relocate(
+    AIC_CD3, .after = AIC_C1
+  ) |>
+  relocate(
+    AIC_CD2, .after = AIC_C1
+  ) |>
+  relocate(
+    AIC_CD1, .after = AIC_C1
+  ) |>
+  relocate(
+    AIC_C3, .after = AIC_C1
+  ) |>
+  relocate(
+    AIC_C2, .after = AIC_C1
+  )
+
+#to determine maximum loglikelihood, minimum AIC, and minimum BIC across all models
+AIC_summ <- AIC_summ |>
+  group_by(PID) |>
+  mutate(minAIC = names(AIC_summ[, 2:7])[which.min(c(AIC_C1, AIC_C2,
+                                                         AIC_C3, AIC_CD1,
+                                                         AIC_CD2, AIC_CD3))]
+         )
+
+AIC_summ |>
+  group_by(minAIC) |>
+  count()
+```
+
+# RQ2c: Convergent Validity between Situation Parameter and Personality State Variability
+
+Extracting the estimate of each participant's situation parameter for both MLM and idiographic models and correlating those values with participants' standard deviation in the corresponding personality state.
+
+## MLM Models
+
+### Linear model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting random effects of situation term into separate data frame
+MLM_CD1_val <- res_MLMCD1$eta_smooth_final[4, ]
+MLM_CD1_val <- as.data.frame(MLM_CD1_val)
+
+#appending PIDs to random effect data frame
+MLM_CD1_val[, 2] <- GP$PID
+MLM_CD1_val <- MLM_CD1_val |>
+  rename(
+    Duty_ran = MLM_CD1_val,
+    PID = V2
+  )
+
+#creating value averaging random effects per wave for each participant
+MLM_CD1_val <- MLM_CD1_val |>
+  group_by(PID) |>
+  summarise(
+    Avg_ran = mean(Duty_ran)
+  )
+
+#extracting standard deviation of personality states per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#creating column with standard deviation values
+MLM_CD1_val[, 3] <- GP_sd$Cons_sd
+MLM_CD1_val <- MLM_CD1_val |>
+  rename(
+    Cons_sd = ...3
+  )
+
+#correlation test between random estimates and standard deviations
+cor.test(MLM_CD1_val$Avg_ran, MLM_CD1_val$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+MLM_CD1_val <- MLM_CD1_val |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(MLM_CD1_val$Avg_ran, MLM_CD1_val$Cons_mssd)
+```
+
+### Quadractic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting random effects of situation term into separate data frame
+MLM_CD2_val <- res_MLMCD2$eta_smooth_final[5, ]
+MLM_CD2_val <- as.data.frame(MLM_CD2_val)
+
+#appending PIDs to random effect data frame
+MLM_CD2_val[, 2] <- GP$PID
+MLM_CD2_val <- MLM_CD2_val |>
+  rename(
+    Duty_ran = MLM_CD2_val,
+    PID = V2
+  )
+
+#creating value averaging random effects per wave for each participant
+MLM_CD2_val <- MLM_CD2_val |>
+  group_by(PID) |>
+  summarise(
+    Avg_ran = mean(Duty_ran)
+  )
+
+#extracting standard deviation of personality states per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#creating column with standard deviation values
+MLM_CD2_val[, 3] <- GP_sd$Cons_sd
+MLM_CD2_val <- MLM_CD2_val |>
+  rename(
+    Cons_sd = ...3
+  )
+
+#correlation test between random estimates and standard deviations
+cor.test(MLM_CD2_val$Avg_ran, MLM_CD2_val$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+MLM_CD2_val <- MLM_CD2_val |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(MLM_CD2_val$Avg_ran, MLM_CD2_val$Cons_mssd)
+```
+
+### Cubic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting random effects of situation term into separate data frame
+MLM_CD3_val <- res_MLMCD3$eta_smooth_final[6, ]
+MLM_CD3_val <- as.data.frame(MLM_CD3_val)
+
+#appending PIDs to random effect data frame
+MLM_CD3_val[, 2] <- GP$PID
+MLM_CD3_val <- MLM_CD3_val |>
+  rename(
+    Duty_ran = MLM_CD3_val,
+    PID = V2
+  )
+
+#creating value averaging random effects per wave for each participant
+MLM_CD3_val <- MLM_CD3_val |>
+  group_by(PID) |>
+  summarise(
+    Avg_ran = mean(Duty_ran)
+  )
+
+#extracting standard deviation of personality states per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#creating column with standard deviation values
+MLM_CD3_val[, 3] <- GP_sd$Cons_sd
+MLM_CD3_val <- MLM_CD3_val |>
+  rename(
+    Cons_sd = ...3
+  )
+
+#correlation test between random estimates and standard deviations
+cor.test(MLM_CD3_val$Avg_ran, MLM_CD3_val$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+MLM_CD3_val <- MLM_CD3_val |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(MLM_CD3_val$Avg_ran, MLM_CD3_val$Cons_mssd)
+```
+
+## Idiographic Models
+
+### Linear model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting situation term
+val_CD1 <- summary_CD1 |>
+  filter(terms=="g2") |>
+  select(1:3)
+
+#joining with AIC data frame to extract participants best fit with linear dynamics
+val_CIC <- AIC_summ |>
+  select(PID, minAIC)
+val_CD1 <- val_CD1 |>
+  left_join(val_CIC, join_by(PID))
+
+#calculating standard deviation of personality state per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#joining standard deviation variable with data frame
+val_CD1 <- val_CD1 |>
+  left_join(GP_sd, join_by(PID))
+
+#filtering to only look at participants who match the relevant model
+val_CD1 <- val_CD1 |>
+  filter(minAIC=="AIC_CD1")
+
+#correlation test between situation parameter estimates and personality state standard deviations
+cor.test(val_CD1$Estimate, val_CD1$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+val_CD1 <- val_CD1 |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(val_CD1$Estimate, val_CD1$Cons_mssd)
+```
+
+### Quadractic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting situation term
+val_CD2 <- summary_CD2 |>
+  filter(terms=="g3") |>
+  select(1:3)
+
+#joining with AIC data frame to extract participants best fit with linear dynamics
+
+#run this code if data frame was not already created
+val_CIC <- AIC_summ |>
+  select(PID, minAIC)
+
+val_CD2 <- val_CD2 |>
+  left_join(val_CIC, join_by(PID))
+
+#calculating standard deviation of personality state per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#joining standard deviation variable with data frame
+val_CD2 <- val_CD2 |>
+  left_join(GP_sd, join_by(PID))
+
+#filtering to only look at participants who match the relevant model
+val_CD2 <- val_CD2 |>
+  filter(minAIC=="AIC_CD2")
+
+#correlation test between situation parameter estimates and personality state standard deviations
+cor.test(val_CD2$Estimate, val_CD2$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+val_CD2 <- val_CD2 |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(val_CD2$Estimate, val_CD2$Cons_mssd)
+```
+
+### Cubic model with situation
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#extracting situation term
+val_CD3 <- summary_CD3 |>
+  filter(terms=="e") |>
+  select(1:3)
+
+#joining with AIC data frame to extract participants best fit with linear dynamics
+
+#run this code if data frame was not already created
+val_CIC <- AIC_summ |>
+  select(PID, minAIC)
+
+val_CD3 <- val_CD3 |>
+  left_join(val_CIC, join_by(PID))
+
+#calculating standard deviation of personality state per participant
+
+#run this code if data frame was not already created
+GP_sd <- GP |>
+  group_by(PID) |>
+  summarise(
+    Cons_sd = sd(Cons_PC)
+  )
+
+#joining standard deviation variable with data frame
+val_CD3 <- val_CD3 |>
+  left_join(GP_sd, join_by(PID))
+
+#filtering to only look at participants who match the relevant model
+val_CD3 <- val_CD3 |>
+  filter(minAIC=="AIC_CD3")
+
+#correlation test between situation parameter estimates and personality state standard deviations
+cor.test(val_CD3$Estimate, val_CD3$Cons_sd)
+
+#extracting mean square successive difference (MSSD) scores for each participant
+
+#run code if data frame was not already created
+GP_mssd <- mssd(GP$Cons_PC, group = GP$PID, lCo = 1)
+GP_mssd <- as.data.frame(GP_mssd)
+GP_mssd[, 2] <- GP_sd$PID
+GP_mssd <- GP_mssd |>
+  rename(
+    Cons_mssd = V1,
+    PID = V2
+  )
+
+#joining MSSD scores with random effect data frame
+val_CD3 <- val_CD3 |>
+  left_join(GP_mssd, join_by(PID))
+
+#correlation test between random estimates and MSSD scores
+cor.test(val_CD3$Estimate, val_CD3$Cons_mssd)
+```
+
+# RQ3
+
+## Phase Portraits for Idiographic Models
+
+### Creating the data frames with appropriate participants
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+#filtering for participants with significant terms in cubic model cubic for proper visualization
+CD3_non <- summary_CD3 |>
+  filter(terms %in% c("g3", "g4") & `Pr(>|t|)` < 0.1) |>
+  group_by(PID) |>
+  filter(n() == 2)
+
+#changing data frame to a vector of participant IDs
+CD3_PIDs <- as.numeric(CD3_non$PID)
+
+#creating data frame only with participants who fit the criteria
+phase_CD3 <- summary_CD3 |>
+  filter(PID %in% CD3_PIDs)
+
+#filtering for participants with significant quadratic and situation terms for proper visualization
+CD2_non <- summary_CD2 |>
+  filter(terms %in% c("g2", "g3") & `Pr(>|t|)` < 0.1) |>
+  group_by(PID) |>
+  filter(n() == 2)
+
+#filtering for participants who only have significant quadratic terms (i.e., those who do not also have significant cubic terms when fit with that model)
+CD2_PIDs <- setdiff(CD2_non$PID, CD3_non$PID)
+
+#creating data frame only with participants who fit the criteria
+phase_CD2 <- summary_CD2 |>
+  filter(PID %in% CD2_PIDs)
+
+#filtering for participants with significant linear and situation terms for proper visualization
+CD1_non <- summary_CD1 |>
+  filter(terms %in% c("g1", "g2") & `Pr(>|t|)` < 0.1) |>
+  group_by(PID) |>
+  filter(n() == 2)
+
+#filtering for participants who only have significant linear terms (i.e., those who do not also have significant quadratic or cubic terms when fit with those models)
+CD1_PIDs <- setdiff(CD1_non$PID, union(CD2_non$PID, CD3_non$PID))
+
+#creating data frame only with participants who fit the criteria
+phase_CD1 <- summary_CD1 |>
+  filter(PID %in% CD1_PIDs)
+```
+
+### Creating the phase portraits
+
+```{r}
+#| message: false
+#| warning: false
+
+#phase portrait for linear relationship; situation initially set to person-centered mean
+phaseL <- function(t, y, parameters){
+  Du <- 0
+  g0 <- parameters[1]
+  g1 <- parameters[2]
+  g2 <- parameters[3]
+  dy <- g0 + g1 * y + g2 * Du
+  list(dy)
+}
+
+#look at data for participant with significant terms for linear model
+view(phase_CD1)
+
+#manually input estimated values into proper arguments
+phasePortrait(phaseL, xlim = c(-2.5, 2.5), ylim = c(-2.5, 2.5), 
+              parameters = c(0.0028, 0.349, 0.259), points = 10,
+              xlab = "Conscientiousness (Person-centered)",
+              ylab = "dy (Rate of change)"
+              )
+
+#phase portrait for quadratic relationship; situation initially set to person-centered mean
+phaseQ <- function(t, y, parameters){
+  Du <- 0
+  g0 <- parameters[1]
+  g1 <- parameters[2]
+  g2 <- parameters[3]
+  g3 <- parameters[4]
+  dy <- g0 + g1 * y + g2 * y^2 + g3 * Du
+  list(dy)
+}
+
+#look at data for participants with significant terms for quadratic model
+view(phase_CD2)
+
+#manually input estimated values into proper arguments
+phasePortrait(phaseQ, xlim = c(-2.5, 2.5), ylim = c(-2.5, 2.5), 
+              parameters = c(0.024, 0.604, -0.986, 0.129), points = 10,
+              xlab = "Conscientiousness (Person-centered)",
+              ylab = "dy (Rate of change)"
+              )
+
+#phase portrait for cubic relationship; situation initially set to person-centered mean
+phaseC <- function(t, y, parameters){
+  Du <- 0
+  g0 <- parameters[1]
+  g1 <- parameters[2]
+  g2 <- parameters[3]
+  g3 <- parameters[4]
+  g4 <- parameters[5]
+  dy <- g0 + g1 * y + g2 * y^2 + g3 * y^3 + g4 * Du
+  list(dy)
+}
+
+#look at data for participants with significant terms for cubic model
+view(phase_CD3)
+
+#manually input estimated values into proper arguments
+phasePortrait(phaseC, xlim = c(-2.5, 2.5), ylim = c(-2.5, 2.5), 
+              parameters = c(-0.036, 0.999, 0.136, -1.117, 0.369), points = 10,
+              xlab = "Conscientiousness (Person-centered)",
+              ylab = "dy (Rate of change)"
+              )
+```
